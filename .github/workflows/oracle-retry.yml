@@ -26,7 +26,6 @@ jobs:
       OCI_CLI_USER: ${{ secrets.OCI_USER }}
       OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY }}
       OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_KEY }}
       OCI_CLI_REGION: us-ashburn-1
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
       GH_TOKEN: ${{ github.token }}
@@ -34,6 +33,30 @@ jobs:
     steps:
       - name: Install Oracle tool
         run: pip install --quiet oci-cli
+
+      - name: Prepare the key
+        env:
+          KEY: ${{ secrets.OCI_KEY }}
+        run: |
+          # Rebuilds the key cleanly, in case line breaks or extra text
+          # were added when it was pasted. Never prints the key itself.
+          python3 - <<'PY'
+          import os, re
+          k = os.environ.get("KEY", "")
+          m = re.search(r"-----BEGIN ([A-Z ]*?)PRIVATE KEY-----(.*?)-----END", k, re.S)
+          if not m:
+              raise SystemExit("OCI_KEY is missing the line -----BEGIN PRIVATE KEY-----")
+          kind = m.group(1)
+          body = re.sub(r"[^A-Za-z0-9+/=]", "", m.group(2))
+          lines = [body[i:i+64] for i in range(0, len(body), 64)]
+          pem = f"-----BEGIN {kind}PRIVATE KEY-----\n" + "\n".join(lines) + f"\n-----END {kind}PRIVATE KEY-----\n"
+          path = os.path.expanduser("~/oci_key.pem")
+          with open(path, "w") as f:
+              f.write(pem)
+          os.chmod(path, 0o600)
+          print("Key prepared:", len(lines), "lines (a normal key has about 25-28)")
+          PY
+          echo "OCI_CLI_KEY_FILE=$HOME/oci_key.pem" >> "$GITHUB_ENV"
 
       - name: Try to create the server
         run: |
