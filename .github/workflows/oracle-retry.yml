@@ -1,0 +1,79 @@
+# Tries to create the free Oracle server "browser-server" every 15 minutes.
+# When the server exists,
+# this workflow turns itself off.
+# Needs these repository secrets (Settings > Secrets and variables > Actions):
+#   OCI_USER, OCI_TENANCY, OCI_FINGERPRINT, OCI_KEY
+name: Oracle retry
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: oracle-retry
+  cancel-in-progress: false
+
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      OCI_CLI_USER: ${{ secrets.OCI_USER }}
+      OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY }}
+      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_KEY }}
+      OCI_CLI_REGION: us-ashburn-1
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Install Oracle tool
+        run: pip install --quiet oci-cli
+
+      - name: Try to create the server
+        run: |
+          C="$OCI_CLI_TENANCY"
+
+          # Stop for good if the server already exists.
+          COUNT=$(oci compute instance list -c "$C" --display-name browser-server --all \
+            --query 'length(data[?"lifecycle-state"!=`TERMINATED`])' --raw-output)
+          if [ "$COUNT" != "0" ]; then
+            echo "Server already exists. Turning this workflow off."
+            gh workflow disable "Oracle retry"
+            exit 0
+          fi
+
+          SUB=$(oci network subnet list -c "$C" --display-name browser-subnet --query 'data[0].id' --raw-output)
+          IMG=$(oci compute image list -c "$C" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
+            --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC --all \
+            | jq -r '[.data[] | select(."display-name" | contains("Minimal") | not)][0].id')
+          if [ -z "$SUB" ] || [ -z "$IMG" ] || [ "$IMG" = "null" ]; then
+            echo "Could not find the network or the Ubuntu image."; exit 1
+          fi
+
+          # One availability domain per run, taking turns (AD-1, AD-2, AD-3).
+          mapfile -t ADS < <(oci iam availability-domain list -c "$C" | jq -r '.data[].name')
+          AD="${ADS[$(( GITHUB_RUN_NUMBER % ${#ADS[@]} ))]}"
+          echo "Trying $AD"
+
+          echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDupw1+UGqneJfSxAG9dvggQTTAV/ADhTylaiC+4YRCrRN4r+kIALTgkhdTNpULlDQv8plhtWIoLrRpkk3t19XvwS0gkTyPgZJOmMiWBOUTqdkYuosbOKcoA55ToKiaKGe33Ry+bHXIQ6Nbc3plp8kqeflE8AsBsarjP9lX8+ohV1KmMJ+knsoNrCJPZDL8Gw5LIpJRwogSiI5tVwc+xl7CpmCDpqycTktldQ6hPWeL9jh8DQzrr8KVxOQxeDEL+sZnAaFCIVRMmk5fK5sEibNXUlZT94HSjrvVVv9qmyehxSFzh8LOOdBluxwecvrksLsy1UAdtvCwgN/+dWQ6Sfzn ssh-key-2026-11-20" > key.pub
+
+          if oci compute instance launch -c "$C" --availability-domain "$AD" \
+               --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+               --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
+               --display-name browser-server --ssh-authorized-keys-file key.pub > launch.log 2>&1; then
+            echo "SUCCESS! Server created in $AD. Turning this workflow off."
+            gh workflow disable "Oracle retry"
+            exit 0
+          fi
+
+          if grep -qiE "capacity|TooManyRequests" launch.log; then
+            echo "Full, will retry in 15 minutes."
+          else
+            echo "OTHER ERROR:"; tail -15 launch.log; exit 1
+          fi
