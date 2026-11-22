@@ -1,0 +1,51 @@
+#cloud-config
+# Runs once, automatically, the first time browser-server starts.
+# Installs Docker and a Chromium browser you open in a web page.
+# The browser only listens on the server itself (127.0.0.1:3000);
+# it is reached from outside only through the Cloudflare tunnel.
+# Every day at 09:30 UTC (right after the daily IP change) the browser
+# is thrown away and started fresh: no cookies, history or logins.
+
+package_update: true
+packages:
+  - docker.io
+
+write_files:
+  - path: /usr/local/bin/fresh-browser
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Delete the old browser (and everything in it) and start a new one.
+      docker rm -f browser >/dev/null 2>&1 || true
+      docker run -d --name browser \
+        --restart unless-stopped \
+        --shm-size 1g \
+        --security-opt seccomp=unconfined \
+        -e TZ=America/New_York \
+        -p 127.0.0.1:3000:3000 \
+        lscr.io/linuxserver/chromium:latest
+  - path: /etc/systemd/system/fresh-browser.service
+    content: |
+      [Unit]
+      Description=Start a fresh browser
+      After=docker.service
+      Requires=docker.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/fresh-browser
+  - path: /etc/systemd/system/fresh-browser.timer
+    content: |
+      [Unit]
+      Description=Fresh browser every day
+      [Timer]
+      OnCalendar=*-*-* 09:30:00 UTC
+      Persistent=true
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - systemctl enable --now docker
+  - docker pull lscr.io/linuxserver/chromium:latest
+  - /usr/local/bin/fresh-browser
+  - systemctl daemon-reload
+  - systemctl enable --now fresh-browser.timer
