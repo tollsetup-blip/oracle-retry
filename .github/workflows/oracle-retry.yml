@@ -63,9 +63,12 @@ jobs:
           C="$OCI_CLI_TENANCY"
 
           # Stop for good if the server already exists.
-          COUNT=$(oci compute instance list -c "$C" --display-name browser-server --all \
-            --query 'length(data[?"lifecycle-state"!=`TERMINATED`])' --raw-output)
-          if [ "$COUNT" != "0" ]; then
+          # Oracle prints nothing at all when there are no servers, so treat empty as none.
+          OUT=$(oci compute instance list -c "$C" --display-name browser-server --all)
+          if [ -z "$OUT" ]; then OUT='{"data":[]}'; fi
+          COUNT=$(echo "$OUT" | jq '[.data[] | select(."lifecycle-state" != "TERMINATED")] | length')
+          echo "Existing browser-server count: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
             echo "Server already exists. Turning this workflow off."
             gh workflow disable "Oracle retry"
             exit 0
