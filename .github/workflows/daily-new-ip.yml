@@ -1,0 +1,75 @@
+# Gives the Oracle server "browser-server" a new public IP once a day.
+# Does nothing if the server doesn't exist or isn't running.
+# Uses the same secrets as "Oracle retry".
+name: Daily new IP
+
+on:
+  schedule:
+    - cron: '17 9 * * *'   # every day at 09:17 UTC (4:17 or 5:17 AM New York time)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  new-ip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      OCI_CLI_USER: ${{ secrets.OCI_USER }}
+      OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY }}
+      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_CLI_REGION: us-ashburn-1
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: 'True'
+      SUPPRESS_LABEL_WARNING: 'True'
+    steps:
+      - name: Install Oracle tool
+        run: pip install --quiet oci-cli
+
+      - name: Prepare the key
+        env:
+          KEY: ${{ secrets.OCI_KEY }}
+        run: |
+          # Rebuilds the key cleanly. Never prints the key itself.
+          python3 - <<'PY'
+          import os, re
+          k = os.environ.get("KEY", "")
+          m = re.search(r"-----BEGIN ([A-Z ]*?)PRIVATE KEY-----(.*?)-----END", k, re.S)
+          if not m:
+              raise SystemExit("OCI_KEY is missing the line -----BEGIN PRIVATE KEY-----")
+          kind = m.group(1)
+          body = re.sub(r"[^A-Za-z0-9+/=]", "", m.group(2))
+          lines = [body[i:i+64] for i in range(0, len(body), 64)]
+          pem = f"-----BEGIN {kind}PRIVATE KEY-----\n" + "\n".join(lines) + f"\n-----END {kind}PRIVATE KEY-----\n"
+          path = os.path.expanduser("~/oci_key.pem")
+          with open(path, "w") as f:
+              f.write(pem)
+          os.chmod(path, 0o600)
+          PY
+          echo "OCI_CLI_KEY_FILE=$HOME/oci_key.pem" >> "$GITHUB_ENV"
+
+      - name: Swap the public IP
+        run: |
+          C="$OCI_CLI_TENANCY"
+
+          OUT=$(oci compute instance list -c "$C" --display-name browser-server --lifecycle-state RUNNING)
+          if [ -z "$OUT" ]; then OUT='{"data":[]}'; fi
+          INST=$(echo "$OUT" | jq -r '.data[0].id // empty')
+          if [ -z "$INST" ]; then
+            echo "No running browser-server yet. Nothing to do."; exit 0
+          fi
+
+          VNIC=$(oci compute vnic-attachment list -c "$C" --instance-id "$INST" | jq -r '.data[0]."vnic-id"')
+          PRIV=$(oci network private-ip list --vnic-id "$VNIC" | jq -r '.data[] | select(."is-primary") | .id')
+
+          # Remove the old public IP (if any), then ask for a new one.
+          OLD=$(oci network public-ip get --private-ip-id "$PRIV" 2>/dev/null | jq -r '.data.id // empty' || true)
+          OLD_ADDR=$(oci network public-ip get --private-ip-id "$PRIV" 2>/dev/null | jq -r '.data."ip-address" // empty' || true)
+          if [ -n "$OLD" ]; then
+            oci network public-ip delete --public-ip-id "$OLD" --force --wait-for-state TERMINATED > /dev/null
+          fi
+          NEW_ADDR=$(oci network public-ip create -c "$C" --lifetime EPHEMERAL --private-ip-id "$PRIV" \
+            --wait-for-state ASSIGNED | jq -r '.data."ip-address"')
+
+          echo "Old IP: ${OLD_ADDR:-none}"
+          echo "New IP: $NEW_ADDR"

@@ -1,4 +1,4 @@
-# Tries to create the free Oracle server "browser-server" every 15 minutes.
+# Tries to create the free Oracle server "browser-server" every 5 minutes.
 # When the server exists,
 # this workflow turns itself off.
 # Needs these repository secrets (Settings > Secrets and variables > Actions):
@@ -7,11 +7,12 @@ name: Oracle retry
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
   actions: write
+  issues: write
   contents: read
 
 concurrency:
@@ -94,12 +95,15 @@ jobs:
                --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
                --display-name browser-server --ssh-authorized-keys-file key.pub > launch.log 2>&1; then
             echo "SUCCESS! Server created in $AD. Turning this workflow off."
+            # Opening an issue makes GitHub send you a notification/email.
+            gh issue create --title "Your Oracle server was created" \
+              --body "browser-server was created in $AD. Check it in Oracle: Compute > Instances. The retry program has turned itself off; the daily IP change will now run once a day." || true
             gh workflow disable "Oracle retry"
             exit 0
           fi
 
           if grep -qiE "capacity|TooManyRequests" launch.log; then
-            echo "Full, will retry in 15 minutes."
+            echo "Full, will retry in a few minutes."
           else
             echo "OTHER ERROR:"; tail -15 launch.log; exit 1
           fi
