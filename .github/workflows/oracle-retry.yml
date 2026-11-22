@@ -38,6 +38,34 @@ jobs:
       - name: Install Oracle tool
         run: pip install --quiet oci-cli
 
+      - name: Add the Cloudflare tunnel to the setup
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+        run: |
+          # Builds user-data.yaml = cloud-init.yaml + the Cloudflare tunnel.
+          # The token is only written into the file Oracle gives the new
+          # server; it is never printed.
+          python3 - <<'PY'
+          import os, yaml
+          d = yaml.safe_load(open("cloud-init.yaml"))
+          t = os.environ.get("TUNNEL_TOKEN", "").strip()
+          if t:
+              d.setdefault("write_files", []).append({
+                  "path": "/etc/cloudflared.env",
+                  "permissions": "0600",
+                  "content": "TUNNEL_TOKEN=" + t + "\n",
+              })
+              d.setdefault("runcmd", []).append(
+                  "docker run -d --name cloudflared --restart unless-stopped --network host "
+                  "--env-file /etc/cloudflared.env cloudflare/cloudflared:latest tunnel --no-autoupdate run"
+              )
+              print("Cloudflare tunnel: included")
+          else:
+              print("Cloudflare tunnel: no CF_TUNNEL_TOKEN secret, skipping")
+          with open("user-data.yaml", "w") as f:
+              f.write("#cloud-config\n" + yaml.safe_dump(d, sort_keys=False))
+          PY
+
       - name: Prepare the key
         env:
           KEY: ${{ secrets.OCI_KEY }}
@@ -97,7 +125,7 @@ jobs:
                --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' \
                --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
                --display-name browser-server --ssh-authorized-keys-file key.pub \
-               --user-data-file cloud-init.yaml > launch.log 2>&1; then
+               --user-data-file user-data.yaml > launch.log 2>&1; then
             echo "SUCCESS! Server created in $AD. Turning this workflow off."
             # Opening an issue makes GitHub send you a notification/email.
             gh issue create --title "Your Oracle server was created" \
