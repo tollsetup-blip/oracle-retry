@@ -32,6 +32,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Get files
+        uses: actions/checkout@v4
+
       - name: Install Oracle tool
         run: pip install --quiet oci-cli
 
@@ -93,7 +96,8 @@ jobs:
           if oci compute instance launch -c "$C" --availability-domain "$AD" \
                --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' \
                --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
-               --display-name browser-server --ssh-authorized-keys-file key.pub > launch.log 2>&1; then
+               --display-name browser-server --ssh-authorized-keys-file key.pub \
+               --user-data-file cloud-init.yaml > launch.log 2>&1; then
             echo "SUCCESS! Server created in $AD. Turning this workflow off."
             # Opening an issue makes GitHub send you a notification/email.
             gh issue create --title "Your Oracle server was created" \
