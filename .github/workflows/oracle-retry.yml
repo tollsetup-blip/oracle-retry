@@ -1,4 +1,4 @@
-# Tries to create the free Oracle server "browser-server" every 5 minutes.
+# Tries to create the free Oracle server "browser-server" about once a minute.
 # When the server exists,
 # this workflow turns itself off.
 # Needs these repository secrets (Settings > Secrets and variables > Actions):
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   try:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 60
     env:
       OCI_CLI_USER: ${{ secrets.OCI_USER }}
       OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY }}
@@ -114,28 +114,36 @@ jobs:
             echo "Could not find the network or the Ubuntu image."; exit 1
           fi
 
-          # One availability domain per run, taking turns (AD-1, AD-2, AD-3).
           mapfile -t ADS < <(oci iam availability-domain list -c "$C" | jq -r '.data[].name')
-          AD="${ADS[$(( GITHUB_RUN_NUMBER % ${#ADS[@]} ))]}"
-          echo "Trying $AD"
-
           echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDupw1+UGqneJfSxAG9dvggQTTAV/ADhTylaiC+4YRCrRN4r+kIALTgkhdTNpULlDQv8plhtWIoLrRpkk3t19XvwS0gkTyPgZJOmMiWBOUTqdkYuosbOKcoA55ToKiaKGe33Ry+bHXIQ6Nbc3plp8kqeflE8AsBsarjP9lX8+ohV1KmMJ+knsoNrCJPZDL8Gw5LIpJRwogSiI5tVwc+xl7CpmCDpqycTktldQ6hPWeL9jh8DQzrr8KVxOQxeDEL+sZnAaFCIVRMmk5fK5sEibNXUlZT94HSjrvVVv9qmyehxSFzh8LOOdBluxwecvrksLsy1UAdtvCwgN/+dWQ6Sfzn ssh-key-2026-11-20" > key.pub
 
-          if oci compute instance launch -c "$C" --availability-domain "$AD" \
-               --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-               --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
-               --display-name browser-server --ssh-authorized-keys-file key.pub \
-               --user-data-file user-data.yaml > launch.log 2>&1; then
-            echo "SUCCESS! Server created in $AD. Turning this workflow off."
-            # Opening an issue makes GitHub send you a notification/email.
-            gh issue create --title "Your Oracle server was created" \
-              --body "browser-server was created in $AD. Check it in Oracle: Compute > Instances. The retry program has turned itself off; the daily IP change will now run once a day." || true
-            gh workflow disable "Oracle retry"
-            exit 0
-          fi
+          # Keep trying for about 50 minutes (roughly once a minute),
+          # taking turns AD-1, AD-2, AD-3. GitHub starts a new run after.
+          END=$(( $(date +%s) + 50*60 ))
+          i=$GITHUB_RUN_NUMBER
+          while [ "$(date +%s)" -lt "$END" ]; do
+            AD="${ADS[$(( i % ${#ADS[@]} ))]}"; i=$((i+1))
+            echo "$(date -u +%H:%M) trying $AD"
 
-          if grep -qiE "capacity|TooManyRequests" launch.log; then
-            echo "Full, will retry in a few minutes."
-          else
-            echo "OTHER ERROR:"; tail -15 launch.log; exit 1
-          fi
+            if oci compute instance launch -c "$C" --availability-domain "$AD" \
+                 --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                 --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true \
+                 --display-name browser-server --ssh-authorized-keys-file key.pub \
+                 --user-data-file user-data.yaml > launch.log 2>&1; then
+              echo "SUCCESS! Server created in $AD. Turning this workflow off."
+              # Opening an issue makes GitHub send you a notification/email.
+              gh issue create --title "Your Oracle server was created" \
+                --body "browser-server was created in $AD. Check it in Oracle: Compute > Instances. The retry program has turned itself off; the daily IP change will now run once a day." || true
+              gh workflow disable "Oracle retry"
+              exit 0
+            fi
+
+            if grep -qi "TooManyRequests" launch.log; then
+              echo "  Oracle asked to slow down, waiting 3 minutes."; sleep 180
+            elif grep -qi "capacity" launch.log; then
+              echo "  full"; sleep 45
+            else
+              echo "OTHER ERROR:"; tail -15 launch.log; exit 1
+            fi
+          done
+          echo "Still full after this round. The next run will keep trying."
